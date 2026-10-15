@@ -1,17 +1,8 @@
 /* ============================================================
-   ui/RoomView.js
-   ---------------------------------------------------------
-   Multiplayer lobby. Host controls settings + start.
-   Everyone sees the player list and chat.
-   Host can clear the chat for all players.
-
-   Fixes applied:
-     · chat render tolerates {name} and {from}
-     · player_left tolerates {id} and {playerId}
-     · universe/rules selectors tolerate old and new server field names
-     · player avatars escaped (XSS fix)
-     · rejoin mid-game uses top-level msg.state
-     · start button disabled during start
+   ui/RoomView.js — v2.20
+   · Bet panel lives in #roomBetPanel (index.html)
+   · Start button disabled until bet is accepted (1v1 only)
+   · Custom Rules button for host
    ============================================================ */
 const RoomView = {
   _bound: false,
@@ -36,8 +27,7 @@ const RoomView = {
     };
 
     document.getElementById('btnAddBot').onclick = () => {
-      Sound.click();
-      Net.addBot();
+      Sound.click(); Net.addBot();
     };
 
     document.getElementById('btnStartMatch').onclick = () => {
@@ -46,11 +36,11 @@ const RoomView = {
       const btn = document.getElementById('btnStartMatch');
       if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
       Sound.click();
-      try { GameFlow.startMultiplayer(); }
+      try { GameFlow.hostStartGame(); }
       finally {
         setTimeout(() => {
           this._starting = false;
-          if (btn) { btn.disabled = false; btn.textContent = 'Start Match'; }
+          this.render();
         }, 1200);
       }
     };
@@ -65,11 +55,25 @@ const RoomView = {
     };
 
     document.getElementById('btnClearChat').onclick = () => {
-      Sound.click();
-      Net.clearChat();
+      Sound.click(); Net.clearChat();
     };
 
-    // Populate universe + rules dropdowns once.
+    // Custom Rules button (host only) — event delegation
+    document.addEventListener('click', (e) => {
+      const t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#btnCustomRules')) {
+        Sound.click();
+        if (typeof RuleStudioView !== 'undefined') {
+          RuleStudioView.openModal(() => {
+            const rules = JSON.parse(JSON.stringify(RuleStudioView.rules));
+            Net.updateRoom({ customRules: rules, rules: RuleStudioView.presetKey });
+          });
+        }
+      }
+    });
+
+    // Universe dropdown
     const ru = document.getElementById('roomUniverse');
     Object.values(UNIVERSES).forEach(u => {
       const o = document.createElement('option');
@@ -80,15 +84,14 @@ const RoomView = {
     ru.onchange = () => {
       const u = UNIVERSES[ru.value];
       if (!u) return;
-      // Send both field naming conventions so it works with either server.
       Net.updateRoom({
-        universe: u.id,
-        universeId: u.id,
+        universe: u.id, universeId: u.id,
         universeName: `${u.icon} ${u.name}`,
         customDef: null
       });
     };
 
+    // Rules dropdown
     const rr = document.getElementById('roomRules');
     Object.entries(RULE_PRESETS).forEach(([k, p]) => {
       const o = document.createElement('option');
@@ -97,25 +100,16 @@ const RoomView = {
       rr.appendChild(o);
     });
     rr.onchange = () => {
-      Net.updateRoom({ rules: rr.value, rulesKey: rr.value });
+      Net.updateRoom({ rules: rr.value, rulesKey: rr.value, customRules: null });
     };
   },
 
-  /* ── Net event handlers ────────────────────────────────── */
-
-  onCreated() {
-    this._resetChatLog();
-    this.render();
-  },
-
-  onJoined() {
-    this._resetChatLog();
-    this.render();
-  },
+  /* ── Net event handlers ─────────────────────────────── */
+  onCreated() { this._resetChatLog(); this.render(); },
+  onJoined()  { this._resetChatLog(); this.render(); },
 
   onRejoined(msg) {
     this.render();
-    // Server may attach state at the top level (my server) or under msg.room.
     const state = msg.state || (msg.room && msg.room.state) || null;
     const rulesKey = msg.rulesKey || (msg.room && msg.room.rulesKey) || 'classic';
     if (state) {
@@ -127,30 +121,22 @@ const RoomView = {
   onRoomUpdate(msg) {
     this.render();
     if (!msg.room) return;
-
-    // Host cancelled the match → drop everyone back to the room.
     if (msg.room.started === false && ArenaView.state) {
       this._teardownGame();
       show('screen-room');
       Toast.show('Match ended');
       return;
     }
-    // Host started a match and state is embedded.
     if (msg.room.started && msg.room.state && !ArenaView.state) {
       GameFlow.enterMultiplayerGame(msg.room.state, msg.room.rulesKey);
     }
   },
 
-    onChat(msg) {
+  onChat(msg) {
     const log = document.getElementById('chatLog');
     if (!log) return;
-
-    // Server may nest payload under msg.line, or send flat fields.
-    // Accept both shapes so a server update can't break this.
     const data = msg.line || msg;
-
     const line = document.createElement('div');
-
     if (msg.system || data.system) {
       line.className = 'chat-line system';
       line.textContent = data.text || '';
@@ -166,7 +152,6 @@ const RoomView = {
     }
     log.appendChild(line);
     log.scrollTop = log.scrollHeight;
-
     const fromId = data.from || data.playerId;
     if (fromId && fromId !== Net.playerId && typeof Haptics !== 'undefined') Haptics.tap();
   },
@@ -193,7 +178,6 @@ const RoomView = {
   onPlayerLeft(msg) {
     const id = msg.playerId || msg.id;
     const name = msg.name || 'A player';
-
     const log = document.getElementById('chatLog');
     if (log) {
       const line = document.createElement('div');
@@ -202,19 +186,15 @@ const RoomView = {
       log.appendChild(line);
       log.scrollTop = log.scrollHeight;
     }
-
     if (!Net.isHost) return;
     const s = ArenaView.state;
     if (!s || s.winner !== null) return;
-
     const idx = s.players.findIndex(p => p.id === id);
     if (idx === -1 || s.players[idx].isBot) return;
-
     s.players[idx].isBot = true;
     s.players[idx].name += ' (AI)';
     GameEngine.log(`${esc(s.players[idx].name)} disconnected — bot took over`, 'hot');
     ArenaView.render();
-
     if (s.turn === idx) {
       clearTimeout(GameEngine._botTimer);
       const myState = s;
@@ -229,18 +209,14 @@ const RoomView = {
   onRoomClosed(msg) {
     Toast.show((msg && msg.reason) || 'Room closed');
     this._teardownGame();
-    Net.active = false;
-    Net.isHost = false;
-    Net.room = null;
+    Net.active = false; Net.isHost = false; Net.room = null;
     show('screen-home');
   },
 
   onKicked(msg) {
     Toast.show((msg && msg.reason) || 'Removed from room');
     this._teardownGame();
-    Net.active = false;
-    Net.isHost = false;
-    Net.room = null;
+    Net.active = false; Net.isHost = false; Net.room = null;
     show('screen-home');
   },
 
@@ -249,8 +225,7 @@ const RoomView = {
     Sound.bad();
   },
 
-  /* ── Helpers ──────────────────────────────────────────── */
-
+  /* ── Helpers ────────────────────────────────────────── */
   _resetChatLog() {
     const log = document.getElementById('chatLog');
     if (log) log.innerHTML = '';
@@ -268,8 +243,7 @@ const RoomView = {
     });
   },
 
-  /* ── Rendering ────────────────────────────────────────── */
-
+  /* ── Rendering ──────────────────────────────────────── */
   render() {
     const room = Net.room;
     if (!room) return;
@@ -286,11 +260,11 @@ const RoomView = {
       Net.isHost ? `You're the host · ${onlineCount} online`
                  : `Waiting for host · ${onlineCount} online`;
 
+    /* Player list */
     const list = document.getElementById('playerList');
     list.innerHTML = '';
     players.forEach(p => {
-      const isHost = (p.id === room.hostId) ||
-                     (Array.isArray(players) && p.isHost === true);
+      const isHost = (p.id === room.hostId) || (p.isHost === true);
       const isMe = p.id === Net.playerId;
       const row = document.createElement('div');
       row.className = 'player-row' + (!p.connected && !p.isBot ? ' disconnected' : '');
@@ -302,48 +276,77 @@ const RoomView = {
             ${isHost ? '<span class="crown">Host</span>' : ''}
           </div>
           <div class="player-meta">${p.isBot ? 'Bot' : (p.connected ? 'Ready' : 'Disconnected')}</div>
-        </div>
-      `;
+        </div>`;
       const actions = document.createElement('div');
       actions.className = 'player-actions';
       if (Net.isHost && !isMe) {
         const b = document.createElement('button');
         b.className = 'btn-mini';
         b.textContent = p.isBot ? 'Remove' : 'Kick';
-        b.onclick = () => {
-          if (p.isBot) Net.removeBot(p.id);
-          else Net.kick(p.id);
-        };
+        b.onclick = () => { if (p.isBot) Net.removeBot(p.id); else Net.kick(p.id); };
         actions.appendChild(b);
       }
       row.appendChild(actions);
       list.appendChild(row);
     });
 
+    /* Add bot */
     const addBotRow = document.getElementById('addBotRow');
-    if (addBotRow) addBotRow.style.display =
-      (Net.isHost && players.length < 8) ? '' : 'none';
+    if (addBotRow) addBotRow.style.display = (Net.isHost && players.length < 8) ? '' : 'none';
 
+    /* Settings (host only) */
     const settings = document.getElementById('roomSettings');
     if (settings) settings.style.display = Net.isHost ? '' : 'none';
     if (Net.isHost) {
       const ru = document.getElementById('roomUniverse');
       const rr = document.getElementById('roomRules');
-      // Accept both field names.
       const uniKey = room.universe || room.universeId;
       const rulesKey = room.rules || room.rulesKey;
       if (uniKey && ru.value !== uniKey) ru.value = uniKey;
       if (rulesKey && rr.value !== rulesKey) rr.value = rulesKey;
     }
 
+    /* Custom Rules button — inject once, host-only */
+    let rulesBtnWrap = document.getElementById('customRulesBtnWrap');
+    if (Net.isHost && !rulesBtnWrap && settings) {
+      const panel = settings.querySelector('.room-panel');
+      if (panel) {
+        rulesBtnWrap = document.createElement('div');
+        rulesBtnWrap.id = 'customRulesBtnWrap';
+        rulesBtnWrap.style.cssText = 'margin-top:10px';
+        rulesBtnWrap.innerHTML = `<button class="btn ghost" id="btnCustomRules" style="width:100%">⚙️ Advanced Custom Rules</button>`;
+        panel.appendChild(rulesBtnWrap);
+      }
+    }
+    if (rulesBtnWrap) rulesBtnWrap.style.display = Net.isHost ? '' : 'none';
+
+    /* Bet panel — BetView owns the rendering */
+    if (typeof BetView !== 'undefined' && BetView._render) {
+      try { BetView._render(); } catch (e) { console.warn('[RoomView] bet render', e); }
+    }
+
+    /* Start button + bet gate */
     const startBtn = document.getElementById('btnStartMatch');
     const waiting = document.getElementById('waitingBanner');
+    const humans = players.filter(p => !p.isBot);
     const canStart = Net.isHost && players.length >= 2;
-    if (startBtn) startBtn.style.display = canStart ? '' : 'none';
+
+    const is1v1 = (humans.length === 2 && players.length === 2);
+    let betBlocked = false;
+    if (is1v1 && room.bet && room.bet.text && !room.bet.accepted) {
+      betBlocked = true;
+    }
+
+    if (startBtn) {
+      startBtn.style.display = canStart ? '' : 'none';
+      startBtn.disabled = betBlocked;
+      startBtn.textContent = betBlocked ? 'Waiting for bet…' : 'Start Match';
+    }
     if (waiting) {
       waiting.style.display = (!Net.isHost || !canStart) ? '' : 'none';
       if (!Net.isHost) waiting.textContent = 'Waiting for the host to start…';
       else if (players.length < 2) waiting.textContent = 'Need at least 2 players to start.';
+      else if (betBlocked) waiting.textContent = 'Bet set — waiting for opponent to accept.';
       else waiting.textContent = '';
     }
   }

@@ -1,10 +1,7 @@
 /* ============================================================
-   ui/LobbyView.js — Home screen controller (Pulse)
-
-   Fixes applied:
-     · custom-universe switch-away no longer crashes (removed
-       stale option + guarded all UNIVERSES lookups)
-     · addCustomUniverse caches the def so switching back works
+   ui/LobbyView.js — v3.1 Home screen controller
+   · All 4 modes shown in a single grid
+   · No 1v1 tab (online 1v1 lives inside Multiplayer)
    ============================================================ */
 const AVATARS = ['🙂', '😎', '🤖', '👾', '🦊', '🐲', '🦉', '🐺', '👽', '🧙', '🥷', '🦁'];
 
@@ -22,80 +19,116 @@ const LobbyView = {
     } catch (e) {}
     this._applyProfile();
 
+    // Universe dropdown
     const sel = document.getElementById('selUniverse');
-    sel.innerHTML = '';
-    Object.values(UNIVERSES).forEach(u => {
-      const opt = document.createElement('option');
-      opt.value = u.id;
-      opt.textContent = `${u.icon} ${u.name}`;
-      sel.appendChild(opt);
-    });
-    sel.value = this.universeId;
-    sel.onchange = () => {
-      this.universeId = sel.value;
-      if (sel.value !== 'custom') {
-        // Leaving custom land — drop the stale option and its def.
-        const customOpt = Array.from(sel.options).find(o => o.value === 'custom');
-        if (customOpt) customOpt.remove();
-        this.customDef = null;
-      }
-      this._updateHero();
-      Sound.click();
-    };
-
-    const selP = document.getElementById('selPlayers');
-    selP.value = this.players;
-    selP.onchange = () => {
-      this.players = parseInt(selP.value, 10);
-      const maxBots = this.players - 1;
-      const selBots = document.getElementById('selBots');
-      if (this.bots > maxBots) {
-        this.bots = maxBots;
-        selBots.value = String(maxBots);
-      }
-      Array.from(selBots.options).forEach(o => {
-        o.disabled = parseInt(o.value, 10) > maxBots;
+    if (sel) {
+      sel.innerHTML = '';
+      Object.values(UNIVERSES).forEach(u => {
+        const opt = document.createElement('option');
+        opt.value = u.id;
+        opt.textContent = `${u.icon} ${u.name}`;
+        sel.appendChild(opt);
       });
-      this._updateHero();
-    };
+      sel.value = this.universeId;
+      sel.onchange = () => {
+        this.universeId = sel.value;
+        if (sel.value !== 'custom') {
+          const customOpt = Array.from(sel.options).find(o => o.value === 'custom');
+          if (customOpt) customOpt.remove();
+          this.customDef = null;
+        }
+        this._updateHero();
+        Sound.click();
+      };
+    }
 
+    // Players dropdown
+    const selP = document.getElementById('selPlayers');
+    if (selP) {
+      selP.value = this.players;
+      selP.onchange = () => {
+        this.players = parseInt(selP.value, 10);
+        const maxBots = this.players - 1;
+        const selBots = document.getElementById('selBots');
+        if (this.bots > maxBots) {
+          this.bots = maxBots;
+          if (selBots) selBots.value = String(maxBots);
+        }
+        if (selBots) {
+          Array.from(selBots.options).forEach(o => {
+            o.disabled = parseInt(o.value, 10) > maxBots;
+          });
+        }
+        this._updateHero();
+      };
+    }
+
+    // Bots dropdown
     const selB = document.getElementById('selBots');
-    selB.value = this.bots;
-    selB.onchange = () => {
-      this.bots = parseInt(selB.value, 10);
-      this._updateHero();
+    if (selB) {
+      selB.value = this.bots;
+      selB.onchange = () => {
+        this.bots = parseInt(selB.value, 10);
+        this._updateHero();
+      };
+    }
+
+    // Mode cards
+    this._buildModeCards();
+
+    // Buttons
+    const bind = (id, fn) => {
+      const el = document.getElementById(id);
+      if (el) el.onclick = fn;
     };
 
-    const selR = document.getElementById('selRules');
-    Object.entries(RULE_PRESETS).forEach(([k, p]) => {
-      const opt = document.createElement('option');
-      opt.value = k;
-      opt.textContent = `${p.icon} ${p.name}`;
-      selR.appendChild(opt);
-    });
-    selR.value = 'classic';
-    selR.onchange = () => {
-      RuleStudioView.presetKey = selR.value;
-      RuleStudioView.rules = RULE_PRESETS[selR.value].rules();
-      this._updateHero();
-      Sound.click();
-    };
-
-    document.getElementById('btnProfile').onclick = () => { Sound.click(); this.openProfileModal(); };
-    document.getElementById('btnQuickPlay').onclick = () => { Sound.click(); GameFlow.startGame(); };
-    document.getElementById('btnOpenRules').onclick = () => {
+    bind('btnProfile', () => { Sound.click(); this.openProfileModal(); });
+    bind('btnQuickPlay', () => { Sound.click(); GameFlow.startGame(); });
+    bind('btnOpenRules', () => {
       Sound.click();
       RuleStudioView.openModal(() => {
-        selR.value = RuleStudioView.presetKey;
+        this._markActiveMode(RuleStudioView.presetKey);
         this._updateHero();
       });
-    };
-    document.getElementById('btnOpenCustom').onclick = () => {
+    });
+    bind('btnOpenCustom', () => {
       Sound.click();
       Modal.customDeck(def => this.addCustomUniverse(def));
-    };
+    });
 
     this._updateHero();
+  },
+
+  _buildModeCards() {
+    const grid = document.getElementById('mainModeGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    Object.entries(RULE_PRESETS).forEach(([key, p]) => {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'mode-card' + (key === RuleStudioView.presetKey ? ' sel' : '');
+      el.dataset.mode = key;
+      el.innerHTML = `
+        <span class="mc-icon">${p.icon || '🎴'}</span>
+        <span class="mc-name">${esc(p.name || key)}</span>
+        <span class="mc-desc">${esc(p.desc || '')}</span>
+      `;
+      el.onclick = () => {
+        Sound.click();
+        RuleStudioView.presetKey = key;
+        RuleStudioView.rules = RULE_PRESETS[key].rules();
+        this._markActiveMode(key);
+        this._updateHero();
+      };
+      grid.appendChild(el);
+    });
+  },
+
+  _markActiveMode(key) {
+    document.querySelectorAll('.mode-card').forEach(el => {
+      el.classList.toggle('sel', el.dataset.mode === key);
+    });
   },
 
   _applyProfile() {
@@ -128,16 +161,21 @@ const LobbyView = {
     this.customDef = def;
     this.universeId = 'custom';
     const sel = document.getElementById('selUniverse');
-    // Remove any previous custom option first.
-    Array.from(sel.options).forEach(o => { if (o.value === 'custom') o.remove(); });
-    const opt = document.createElement('option');
-    opt.value = 'custom';
-    opt.textContent = `🎨 ${def.name}`;
-    sel.appendChild(opt);
-    sel.value = 'custom';
+    if (sel) {
+      Array.from(sel.options).forEach(o => { if (o.value === 'custom') o.remove(); });
+      const opt = document.createElement('option');
+      opt.value = 'custom';
+      opt.textContent = `🎨 ${def.name}`;
+      sel.appendChild(opt);
+      sel.value = 'custom';
+    }
     this._updateHero();
     Toast.show(`Loaded "${def.name}"`);
   },
+
+  /* Kept for backward compat with app.js — no 1v1 tab anymore */
+  get1v1Bet() { return null; },
+  get1v1P2Name() { return 'Player 2'; },
 
   openProfileModal() {
     const m = Modal.open(`

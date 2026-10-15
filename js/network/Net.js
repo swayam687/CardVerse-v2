@@ -262,7 +262,7 @@ const Net = {
 
   updateRoom(patch)  { this._send({ type: 'update_room', ...patch }); },
   addBot()           { this._send({ type: 'add_bot' }); },
-  removeBot(botId)   { this._send({ type: 'remove_bot', botId }); },
+  removeBot(botId)   { this._send({ type: 'remove_bot', playerId: botId }); },
   kick(playerId)     { this._send({ type: 'kick', playerId }); },
   chat(text)         { this._send({ type: 'chat', text }); },
   sendEmote(emoji)   { this._send({ type: 'emote', emoji }); },

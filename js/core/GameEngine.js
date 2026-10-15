@@ -1,13 +1,10 @@
 /* ============================================================
-   core/GameEngine.js — v2.12
-   · Stacking accumulates
-   · Win-by-loss protected
-   · REVERSE = SKIP in 2p
-   · Uno Classic filter
-   · reveal has viewerIdx + ts
-   · opts defensive
-   · Bot try/catch
-   · ▼ wild abilities (Thanos/Kaguya) gated at resolve, not play
+   core/GameEngine.js — v2.19
+   · No Mercy extras (+6/+10/Discard All/Skip Everyone)
+   · 7-swap, 0-rotate (No Mercy)
+   · Hand limits: forcePlayAt, eliminateAt, drawCap
+   · Chaos extra draws
+   · All v2.16 fixes retained
    ============================================================ */
 const GameEngine = {
   state: null,
@@ -17,17 +14,20 @@ const GameEngine = {
     const p = state.players[idx];
     return p ? esc(p.name) : '???';
   },
-
   _abilitiesOn(state) {
     const r = state && state.rules;
     if (!r || !r.abilities) return true;
     return r.abilities.enabled !== false;
   },
+  _stickyShield(state) {
+    const r = state && state.rules;
+    return !!(r && r.abilities && r.abilities.stickyShield);
+  },
 
   blockedByDefense(state, targetIdx, actor) {
     if (targetIdx === actor) return false;
     const t = state.players[targetIdx];
-    if (!t) return true;
+    if (!t || t.eliminated) return true;
     if (t.immune) { this.log(`${esc(t.name)} is immune`); return true; }
     if (t.shield > 0) {
       t.shield--;
@@ -39,7 +39,16 @@ const GameEngine = {
 
   checkWin(state, allowedWinner = null) {
     if (state.winner !== null) return;
+    const alive = state.players.filter(p => !p.eliminated);
+    if (alive.length === 1 && state.players.length > 1) {
+      const idx = state.players.indexOf(alive[0]);
+      state.winner = idx;
+      if (this._botTimer) { clearTimeout(this._botTimer); this._botTimer = null; }
+      this.log(`<b>${this._nm(state, idx)}</b> wins — last one standing!`, 'hot');
+      return;
+    }
     for (let i = 0; i < state.players.length; i++) {
+      if (state.players[i].eliminated) continue;
       if (state.players[i].hand.length !== 0) continue;
       if (allowedWinner !== null && i !== allowedWinner) {
         this.drawTo(state, i, 1, true);
@@ -53,12 +62,40 @@ const GameEngine = {
     }
   },
 
+  _checkElimination(state, playerIdx) {
+    const r = state.rules;
+    if (!r || !r.handLimit || !r.handLimit.eliminateAt) return;
+    const p = state.players[playerIdx];
+    if (!p || p.eliminated) return;
+    if (p.hand.length >= r.handLimit.eliminateAt) {
+      p.eliminated = true;
+      // Discard their hand
+      for (const c of p.hand) state.discard.push(c);
+      p.hand = [];
+      this.log(`<b>${esc(p.name)}</b> eliminated (hand hit ${r.handLimit.eliminateAt})`, 'hot');
+      if (typeof Sound !== 'undefined') Sound.bad();
+    }
+  },
+
   create({ players, universeId, customDef, rules, universeName }) {
     if (this._botTimer) { clearTimeout(this._botTimer); this._botTimer = null; }
 
     const state = makeGameState({ players, universeId, universeName, rules });
     state.deck = buildDeck(universeId, customDef);
 
+    // Filter out No Mercy extras unless enabled
+    if (!(rules.deal && rules.deal.noMercyExtras)) {
+      state.deck = state.deck.filter(c => !c.noMercyOnly);
+    }
+    // Extra +2/+4 copies for Chaos
+    if (rules.deal && rules.deal.extraDraws) {
+      const extras = state.deck.filter(c => {
+        const amt = this.stackAmount(c);
+        return amt === 2 || amt === 4;
+      });
+      state.deck = state.deck.concat(extras);
+    }
+    // allWild mode (kept for compat)
     const deckMode = rules && rules.deal && rules.deal.deckMode;
     if (deckMode === 'allWild') {
       state.deck = state.deck.map(card => {
@@ -66,6 +103,8 @@ const GameEngine = {
         return { ...card, color: 'wild' };
       });
     }
+
+    state.deck = shuffle(state.deck);
 
     const hs = (rules && rules.deal && rules.deal.handSize) || 7;
     for (let r = 0; r < hs; r++) {
@@ -79,6 +118,14 @@ const GameEngine = {
     state.activeColor = first.color === 'wild'
       ? ['red','blue','green','yellow'][Math.floor(Math.random() * 4)]
       : first.color;
+
+    for (const p of state.players) {
+      p.shield = 0;
+      p.immune = false;
+      p._protectJustSet = false;
+      p.eliminated = false;
+      p.drawnThisTurn = 0;
+    }
 
     this.state = state;
     this.log(`Game started · ${hs} cards each`, 'hot');
@@ -105,27 +152,28 @@ const GameEngine = {
 
   drawTo(state, playerIdx, amount, silent = false) {
     const p = state.players[playerIdx];
-    let n = amount;
-    if (p.shield > 0 && n > 0) {
-      const blocked = Math.min(p.shield, n);
-      p.shield -= blocked; n -= blocked;
-      if (!silent && blocked > 0) {
-        this.log(`${esc(p.name)}'s Shield blocked ${blocked} card${blocked > 1 ? 's' : ''}!`, 'hot');
-      }
+    let n = Math.max(0, amount);
+    // Draw cap per turn
+    const cap = state.rules && state.rules.handLimit && state.rules.handLimit.drawCap;
+    if (cap > 0) {
+      const already = p.drawnThisTurn || 0;
+      n = Math.max(0, Math.min(n, cap - already));
     }
     for (let i = 0; i < n; i++) {
       if (!state.deck.length) this.reshuffle(state);
       if (!state.deck.length) break;
       p.hand.push(state.deck.pop());
     }
-    p.stats.drawn += Math.max(0, n);
-    return Math.max(0, n);
+    p.stats.drawn += n;
+    p.drawnThisTurn = (p.drawnThisTurn || 0) + n;
+    this._checkElimination(state, playerIdx);
+    return n;
   },
 
   playCard(state, playerIdx, uid, opts = {}) {
     opts = opts || {};
-
     const player = state.players[playerIdx];
+    if (!player || player.eliminated) return { ok: false, reason: 'Eliminated' };
     const idx = player.hand.findIndex(c => c.uid === uid);
     if (idx === -1) return { ok: false, reason: 'Card not in hand' };
 
@@ -135,13 +183,8 @@ const GameEngine = {
     if (!RuleEngine.meetsRequirement(card, player, state.rules))
       return { ok: false, reason: `${card.name} requires ${card.requires.minHand}+ cards in hand` };
 
-    // ▼▼▼ v2.12 CHANGE — capture ability unlock BEFORE removing card ▼▼▼
-    // Wilds may be played as plain color changes even when their ability
-    // cost isn't met (Thanos, Kaguya).
-    const abilityUnlocked = !card.requires
-      || !card.requires.minHand
+    const abilityUnlocked = !card.requires || !card.requires.minHand
       || player.hand.length >= card.requires.minHand;
-    // ▲▲▲
 
     const abilitiesOn = this._abilitiesOn(state);
     const needChoose = abilitiesOn && Array.isArray(card.effects)
@@ -191,9 +234,29 @@ const GameEngine = {
       return { ok: true, card, won: true };
     }
 
-    // ▼▼▼ v2.12 CHANGE — pass abilityUnlocked through ▼▼▼
     const ctx = this.resolveEffects(state, playerIdx, card, wasPending, opts, abilityUnlocked);
-    // ▲▲▲
+
+    // No Mercy number-card rules (7=swap, 0=rotate)
+    if (state.rules.deal && state.rules.deal.noMercyNumbers && card.type === 'number') {
+      if (card.value === 7) {
+        // Swap with next non-eliminated player
+        const nxt = RuleEngine.targets(state, playerIdx, 'next')[0];
+        if (nxt !== undefined && nxt !== playerIdx) {
+          const tmp = state.players[playerIdx].hand;
+          state.players[playerIdx].hand = state.players[nxt].hand;
+          state.players[nxt].hand = tmp;
+          this.log(`<b>7</b> — ${this._nm(state, playerIdx)} swapped hands with ${this._nm(state, nxt)}`, 'hot');
+        }
+      } else if (card.value === 0) {
+        const n = state.players.length;
+        const hands = state.players.map(p => p.hand);
+        for (let i = 0; i < n; i++) {
+          const from = mod(i - state.direction, n);
+          state.players[i].hand = hands[from];
+        }
+        this.log(`<b>0</b> — every player passes their hand ${state.direction === 1 ? 'clockwise' : 'counter-clockwise'}`, 'hot');
+      }
+    }
 
     this.checkWin(state, playerIdx);
     if (state.winner !== null) return { ok: true, card, ctx, won: true };
@@ -216,10 +279,18 @@ const GameEngine = {
     for (let i = 0; i < state.players.length; i++) {
       if (i === catcherIdx) continue;
       const p = state.players[i];
+      if (p.eliminated) continue;
       if (p.hand.length === 1 && !state.lastCardCalled[i]) {
-        this.drawTo(state, i, 2);
-        state.lastCardCalled[i] = false;
-        this.log(`<b>${esc(state.players[catcherIdx].name)}</b> caught <b>${esc(p.name)}</b> — didn't say UNO! +2 cards`, 'hot');
+        if (p.immune) {
+          this.log(`<b>${esc(state.players[catcherIdx].name)}</b> tried to catch <b>${esc(p.name)}</b> — immune!`, 'hot');
+        } else if (p.shield > 0) {
+          p.shield -= 1;
+          this.log(`<b>${esc(state.players[catcherIdx].name)}</b> tried to catch <b>${esc(p.name)}</b> — Shield absorbed it!`, 'hot');
+        } else {
+          this.drawTo(state, i, 2);
+          state.lastCardCalled[i] = false;
+          this.log(`<b>${esc(state.players[catcherIdx].name)}</b> caught <b>${esc(p.name)}</b> — didn't say UNO! +2 cards`, 'hot');
+        }
         if (typeof Sound !== 'undefined') Sound.bad();
         return { ok: true, targetIdx: i };
       }
@@ -227,20 +298,16 @@ const GameEngine = {
     return { ok: false, reason: 'No one to catch' };
   },
 
-  // ▼▼▼ v2.12 CHANGE — extra abilityUnlocked param ▼▼▼
   resolveEffects(state, actor, card, wasPending, opts = {}, abilityUnlocked = true) {
     opts = opts || {};
     const ctx = { skip: 0, reverse: false, extraTurn: false };
-    const rules = state.rules || {};
     let effects = Array.isArray(card.effects) ? card.effects.slice() : [];
 
-    // Ability cost not met → play as a plain card (color change only).
     if (!abilityUnlocked && card.requires) {
       const need = card.requires.minHand || '?';
       this.log(`<b>${esc(card.name)}</b> — ability skipped (needs ${need}+ cards)`);
       effects = [];
     }
-    // ▲▲▲
 
     if (!this._abilitiesOn(state)) {
       const isWild = card.color === 'wild';
@@ -257,27 +324,33 @@ const GameEngine = {
 
     if (effects.some(e => e.type === 'COPY')) {
       const last = state.lastAction;
-      if (last && last.uid !== card.uid && Array.isArray(last.effects)) {
-        effects = effects.filter(e => e.type !== 'COPY')
-          .concat(last.effects.filter(e => e.type !== 'COPY'));
-        this.log(`${esc(card.name)} copies ${esc(last.name)}'s ability!`, 'hot');
-      } else {
+      const fallback = () => {
         effects = effects.filter(e => e.type !== 'COPY');
-        this.log(`${esc(card.name)} has nothing to copy`);
-      }
+        effects.push({ type: 'DRAW', target: 'next', amount: 2 });
+        this.log(`${esc(card.name)} has nothing to copy — next player draws 2`);
+      };
+      if (last && last.uid !== card.uid && Array.isArray(last.effects)) {
+        const copied = last.effects.filter(e => e.type !== 'COPY');
+        if (copied.length) {
+          effects = effects.filter(e => e.type !== 'COPY').concat(copied);
+          this.log(`${esc(card.name)} copies ${esc(last.name)}'s ability!`, 'hot');
+        } else fallback();
+      } else fallback();
     }
 
+    const localHumanIdx = (typeof ArenaView !== 'undefined' && typeof ArenaView._localIdx === 'number')
+      ? ArenaView._localIdx : 0;
+
     const harmful = new Set(['DRAW', 'DISCARD', 'SWAP_HANDS', 'STEAL']);
-    if (actor !== 0) {
+    if (actor !== localHumanIdx) {
       for (const e of effects) {
         if (!harmful.has(e.type)) continue;
         let tgts;
-        if (e.target === 'choose') {
-          tgts = (typeof opts.targetIdx === 'number') ? [opts.targetIdx] : [];
-        } else {
-          tgts = RuleEngine.targets(state, actor, e.target || 'self');
+        if (e.target === 'choose') tgts = (typeof opts.targetIdx === 'number') ? [opts.targetIdx] : [];
+        else tgts = RuleEngine.targets(state, actor, e.target || 'self');
+        if (tgts.includes(localHumanIdx) && typeof Achievements !== 'undefined') {
+          Achievements.onHumanHit();
         }
-        if (tgts.includes(0) && typeof Achievements !== 'undefined') Achievements.onHumanHit();
       }
     }
 
@@ -295,7 +368,10 @@ const GameEngine = {
           if (e.target === 'next') {
             state.pendingDraw = (state.pendingDraw || 0) + e.amount;
           } else {
-            for (const t of targets) this.drawTo(state, t, e.amount);
+            for (const t of targets) {
+              if (t !== actor && this.blockedByDefense(state, t, actor)) continue;
+              this.drawTo(state, t, e.amount);
+            }
           }
           break;
         }
@@ -310,6 +386,31 @@ const GameEngine = {
           ctx.extraTurn = true;
           this.log(`${this._nm(state, actor)} gets another turn`);
           break;
+
+        case 'SKIP_EVERYONE': {
+          const n = state.players.length;
+          ctx.skip = Math.max(0, n - 1);
+          this.log(`Everyone else skips!`, 'hot');
+          break;
+        }
+
+        case 'DISCARD_COLOR': {
+          const myColor = card.color;
+          const mine = state.players[actor].hand.slice();
+          let count = 0;
+          for (const c of mine) {
+            if (c.color === myColor) {
+              const i = state.players[actor].hand.indexOf(c);
+              if (i !== -1) {
+                state.players[actor].hand.splice(i, 1);
+                state.discard.push(c);
+                count++;
+              }
+            }
+          }
+          if (count > 0) this.log(`${this._nm(state, actor)} discarded ${count} ${myColor} card${count > 1 ? 's' : ''}`, 'hot');
+          break;
+        }
 
         case EFFECTS.DISCARD: {
           for (const t of targets) {
@@ -327,7 +428,6 @@ const GameEngine = {
           }
           break;
         }
-
         case EFFECTS.SWAP_HANDS: {
           for (const t of targets) {
             if (t === actor) continue;
@@ -339,7 +439,6 @@ const GameEngine = {
           }
           break;
         }
-
         case EFFECTS.STEAL: {
           for (const t of targets) {
             if (t === actor) continue;
@@ -351,9 +450,7 @@ const GameEngine = {
                 const [c] = victim.hand.splice(ci, 1);
                 state.players[actor].hand.push(c);
                 this.log(`${this._nm(state, actor)} took ${esc(c.name)} from ${this._nm(state, t)}`, 'hot');
-              } else {
-                this.log(`Card gone — steal cancelled`);
-              }
+              } else this.log(`Card gone — steal cancelled`);
             } else {
               const amt = e.amount || 1;
               let taken = 0;
@@ -369,10 +466,11 @@ const GameEngine = {
           }
           break;
         }
-
         case EFFECTS.REVEAL: {
           const t = targets[0];
           if (t === undefined) break;
+          const pierce = this._stickyShield(state);
+          if (!pierce && this.blockedByDefense(state, t, actor)) break;
           state.reveal = {
             playerIdx: t,
             cards: state.players[t].hand.slice(),
@@ -386,16 +484,20 @@ const GameEngine = {
           }
           break;
         }
-
-        case EFFECTS.SHIELD:
-          state.players[actor].shield += 1;
+        case EFFECTS.SHIELD: {
+          const p = state.players[actor];
+          p.shield += 1;
+          p._protectJustSet = true;
           this.log(`${this._nm(state, actor)} raises a Shield`);
           break;
-
-        case EFFECTS.IMMUNE:
-          state.players[actor].immune = true;
+        }
+        case EFFECTS.IMMUNE: {
+          const p = state.players[actor];
+          p.immune = true;
+          p._protectJustSet = true;
           this.log(`${this._nm(state, actor)} is untargetable`);
           break;
+        }
       }
     }
 
@@ -407,6 +509,22 @@ const GameEngine = {
     if (state.winner !== null) return;
     const n = state.players.length;
 
+    state.reveal = null;
+
+    const actorIdx = state.turn;
+    const actor = state.players[actorIdx];
+    if (actor) {
+      if (actor._protectJustSet) actor._protectJustSet = false;
+      else {
+        const sticky = this._stickyShield(state);
+        if (!sticky) {
+          if (actor.shield > 1) actor.shield -= 1;
+          else if (actor.shield > 0) actor.shield = 0;
+        }
+        actor.immune = false;
+      }
+    }
+
     if (ctx.reverse) {
       state.direction *= -1;
       this.log('Direction reversed');
@@ -414,20 +532,36 @@ const GameEngine = {
     }
 
     const advance = ctx.extraTurn ? 0 : (1 + ctx.skip);
-    state.turn = mod(state.turn + state.direction * advance, n);
+    let nextTurn = mod(state.turn + state.direction * advance, n);
+    // Skip eliminated players
+    let guard = 0;
+    while (state.players[nextTurn] && state.players[nextTurn].eliminated && guard++ < n) {
+      nextTurn = mod(nextTurn + state.direction, n);
+    }
+    state.turn = nextTurn;
     state.turnCount++;
+
+    // Reset draw cap counter for the new active player
+    const np = state.players[state.turn];
+    if (np) np.drawnThisTurn = 0;
+
     this.beginTurn(state);
   },
 
   beginTurn(state) {
     const p = state.players[state.turn];
-    p.immune = false;
-    p.shield = 0;
+    if (!p || p.eliminated) {
+      // Skip — but re-trigger turn for safety
+      return this.finishTurn(state, { skip: 0 });
+    }
+    p._protectJustSet = false;
     state.hasDrawn = false;
     state.turnStart = Date.now();
 
     if (state.pendingDraw > 0) {
-      this.log(`${esc(p.name)} must respond to +${state.pendingDraw}`);
+      const shielded = p.shield > 0 || p.immune;
+      if (shielded) this.log(`${esc(p.name)} can block the +${state.pendingDraw}`);
+      else this.log(`${esc(p.name)} must respond to +${state.pendingDraw}`);
     }
 
     if (typeof ArenaView !== 'undefined') {
@@ -464,12 +598,35 @@ const GameEngine = {
     if (state.pendingDraw > 0) {
       const n = state.pendingDraw;
       state.pendingDraw = 0;
-      this.drawTo(state, playerIdx, n);
-      this.log(`${esc(p.name)} takes +${n}`);
-      if (typeof Sound !== 'undefined') Sound.draw();
+      let negated = false;
+      if (p.immune) {
+        negated = true;
+        this.log(`<b>${esc(p.name)}</b> is immune — +${n} negated!`, 'hot');
+        if (typeof Sound !== 'undefined') Sound.ability();
+      } else if (p.shield > 0) {
+        const sticky = this._stickyShield(state);
+        if (sticky) p.shield = Math.max(0, p.shield - 1);
+        else p.shield = 0;
+        negated = true;
+        this.log(`<b>${esc(p.name)}</b>'s Shield negated the +${n}!`, 'hot');
+        if (typeof Sound !== 'undefined') Sound.ability();
+      } else {
+        this.drawTo(state, playerIdx, n);
+        this.log(`${esc(p.name)} takes +${n}`);
+        if (typeof Sound !== 'undefined') Sound.draw();
+      }
+      if (!negated) {
+        const sticky = this._stickyShield(state);
+        if (!sticky) {
+          if (p.shield > 1) p.shield -= 1;
+          else if (p.shield > 0) p.shield = 0;
+        }
+        p.immune = false;
+      }
+      p._protectJustSet = false;
       state.turn = mod(state.turn + state.direction, state.players.length);
       this.beginTurn(state);
-      return { ok: true, took: n };
+      return { ok: true, took: negated ? 0 : n, negated };
     }
 
     if (!state.deck.length) {
@@ -519,8 +676,24 @@ const GameEngine = {
     const playable = p.hand.some(c =>
       RuleEngine.isPlayable(c, state, state.rules) &&
       RuleEngine.meetsRequirement(c, p, state.rules));
-    const forcePlay = state.rules && state.rules.draw && state.rules.draw.forcePlay;
-    if (playable && forcePlay) return { ok: false, reason: 'You must play if you can' };
+
+    const r = state.rules || {};
+    const forceByRule = r.draw && r.draw.forcePlay;
+    const forceByLimit = r.handLimit && r.handLimit.forcePlayAt > 0
+      && p.hand.length >= r.handLimit.forcePlayAt;
+    if (playable && (forceByRule || forceByLimit)) {
+      return { ok: false, reason: forceByLimit
+        ? `Hand too big — must play (${r.handLimit.forcePlayAt}+ limit)`
+        : 'You must play if you can' };
+    }
+
+    const sticky = this._stickyShield(state);
+    if (!sticky) {
+      if (p.shield > 1) p.shield -= 1;
+      else if (p.shield > 0) p.shield = 0;
+    }
+    p.immune = false;
+    p._protectJustSet = false;
 
     this.log(`${esc(p.name)} passed`);
     state.turn = mod(state.turn + state.direction, state.players.length);

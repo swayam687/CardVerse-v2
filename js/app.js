@@ -1,6 +1,6 @@
 /* ============================================================
    app.js — boot + GameFlow
-   v2.13: browse public rooms, soundPacks, profile hookup.
+   v2.19: custom rules from lobby, online bet display, hotseat 1v1.
    ============================================================ */
 
 const $  = s => document.querySelector(s);
@@ -77,8 +77,13 @@ function openCommunityModal() {
 
 const GameFlow = {
   lastConfig: null, _winnerShown: false, _rematchPending: false,
+  _1v1Bet: null,
+  _1v1Active: false,
 
+  /* ── Solo / bots (Quick Play) ──────────────────────── */
   startGame() {
+    this._1v1Active = false;
+    this._1v1Bet = null;
     Net.active = false;
     Net.isHost = false;
     const lv = LobbyView;
@@ -148,13 +153,69 @@ const GameFlow = {
     for (let i = 0; i < count * 2; i++) setTimeout(() => Sound.deal(), (d++) * 45);
   },
 
-  startMultiplayer() {
+  /* ── Hotseat 1v1 with optional bet ─────────────────── */
+  start1v1() {
+    const lv = LobbyView;
+    const p2name = lv.get1v1P2Name();
+    const bet = lv.get1v1Bet();
+    const uni1v1 = document.getElementById('sel1v1Universe');
+    const universeId = (uni1v1 && uni1v1.value) || 'marvel';
+
+    const activeModeEl = document.querySelector('.duel-mode-btn.sel');
+    const modeKey = (activeModeEl && activeModeEl.dataset.mode) || 'classic';
+    const rules = RULE_PRESETS[modeKey] ? RULE_PRESETS[modeKey].rules() : defaultRules();
+
+    this._1v1Active = true;
+    this._1v1Bet = bet;
+    Net.active = false;
+    Net.isHost = false;
+
+    const myProfile = lv.profile;
+    const players = [
+      makePlayer({ name: myProfile.name || 'Player 1', avatar: myProfile.avatar || '🙂', isBot: false }),
+      makePlayer({ name: p2name || 'Player 2', avatar: '📅', isBot: false })
+    ];
+
+    const u = UNIVERSES[universeId];
+    const universeName = u ? `${u.icon} ${u.name}` : universeId;
+    const rulesLabel = RULE_PRESETS[modeKey]?.name || 'Custom';
+
+    this.lastConfig = {
+      players, universeId, customDef: null,
+      rules: JSON.parse(JSON.stringify(rules)), universeName
+    };
+
+    const state = GameEngine.create({ players, universeId, customDef: null, rules: this.lastConfig.rules, universeName });
+    state.rulesLabel = rulesLabel;
+
+    if (typeof Achievements !== 'undefined') Achievements.onMatchStart();
+    if (typeof PrivacyScreen !== 'undefined' && PrivacyScreen.reset) PrivacyScreen.reset();
+    this._winnerShown = false;
+    if (typeof SoundPacks !== 'undefined') SoundPacks.set('default');
+
+    show('screen-game');
+    ArenaView.mount(state, 0);
+    ArenaView.afterAction();
+    let d = 0;
+    for (let i = 0; i < 4; i++) setTimeout(() => Sound.deal(), (d++) * 45);
+  },
+
+  /* ── Online multiplayer (host start) ───────────────── */
+  hostStartGame() {
     const room = Net.room;
     if (!room || !Net.isHost) return;
     if ((room.players || []).length < 2) { Toast.show('Need at least 2 players'); return; }
 
     const key = room.rules || room.rulesKey;
-    const rules = RULE_PRESETS[key] ? RULE_PRESETS[key].rules() : defaultRules();
+
+    // Prefer custom rules set by host in lobby
+    let rules;
+    if (room.customRules && typeof room.customRules === 'object'
+        && Object.keys(room.customRules).length) {
+      rules = room.customRules;
+    } else {
+      rules = RULE_PRESETS[key] ? RULE_PRESETS[key].rules() : defaultRules();
+    }
     const safeRules = (typeof sanitizeRules === 'function') ? sanitizeRules(rules) : rules;
 
     const players = (room.players || []).map(p =>
@@ -168,7 +229,8 @@ const GameFlow = {
       players, universeId: room.universe || room.universeId || 'marvel',
       customDef: room.customDef || null, rules: safeRules, universeName
     });
-    state.rulesLabel = RULE_PRESETS[key]?.name || 'Custom';
+    state.rulesLabel = (room.customRules && Object.keys(room.customRules).length)
+      ? 'Custom' : (RULE_PRESETS[key]?.name || 'Custom');
 
     if (typeof Achievements !== 'undefined') Achievements.onMatchStart();
     this._winnerShown = false;
@@ -248,6 +310,7 @@ const GameFlow = {
     else return;
 
     if (!res || !res.ok) return;
+    // afterAction() already broadcasts to guests on host
     ArenaView.afterAction();
   },
 
@@ -256,30 +319,74 @@ const GameFlow = {
     this._winnerShown = true;
     ArenaView.stopTimer();
     if (GameEngine._botTimer) { clearTimeout(GameEngine._botTimer); GameEngine._botTimer = null; }
+    if (GameEngine._autoSkipTimer) { clearTimeout(GameEngine._autoSkipTimer); GameEngine._autoSkipTimer = null; }
 
     const s = ArenaView.state;
     if (!s) return;
+
     if (idx === -1) {
       document.getElementById('winEmoji').textContent = '🤝';
       document.getElementById('winTitle').textContent = 'Stalemate';
       document.getElementById('winSub').textContent = 'Deck ran out with no winner.';
       document.getElementById('winStats').innerHTML = '';
+      const br = document.getElementById('betResult');
+      if (br) br.style.display = 'none';
+      const wb = document.getElementById('winBet');
+      if (wb) { wb.style.display = 'none'; wb.innerHTML = ''; }
       show('screen-win');
       return;
     }
+
     const p = s.players[idx];
     if (!p) return;
     const isMe = (Net.active && s.players[idx].id === Net.playerId) ||
                  (!Net.active && idx === 0);
     if (typeof Achievements !== 'undefined') Achievements.onMatchEnd(idx, s);
 
-    document.getElementById('winEmoji').textContent = isMe ? '🏆' : '💀';
-    document.getElementById('winTitle').textContent = isMe ? 'Victory!' : `${p.name} wins`;
+    document.getElementById('winEmoji').textContent = isMe ? '🏆' : '💥';
+    document.getElementById('winTitle').textContent = isMe ? 'Victory!' : `${p.name} wins!`;
     document.getElementById('winSub').textContent = isMe
       ? 'You emptied your hand first.' : 'Better luck next round.';
 
+    // ── 1v1 hotseat bet display ──
+    const betResult = document.getElementById('betResult');
+    const betResultText = document.getElementById('betResultText');
+    const betConfirmBtn = document.getElementById('betConfirmBtn');
+    if (betResult && this._1v1Active) {
+      if (this._1v1Bet) {
+        const winner = s.players[idx];
+        const loser  = s.players.find((_, i) => i !== idx);
+        const loserName  = loser  ? loser.name  : 'Loser';
+        const winnerName = winner ? winner.name : 'Winner';
+        if (betResultText) {
+          betResultText.innerHTML = `<strong>${esc(loserName)}</strong> owes <strong>${esc(winnerName)}</strong> a <span class="bet-item">${esc(this._1v1Bet)}</span>!`;
+        }
+        betResult.style.display = '';
+        if (betConfirmBtn) {
+          betConfirmBtn.onclick = () => {
+            Sound.click();
+            Toast.show(`Bet confirmed! 🎉 Enjoy your ${this._1v1Bet}`);
+            betResult.style.display = 'none';
+          };
+        }
+      } else {
+        betResult.style.display = 'none';
+      }
+    } else if (betResult) {
+      betResult.style.display = 'none';
+    }
+
+    // ── Online bet display (guarded) ──
+    if (typeof BetView !== 'undefined' && BetView.renderWinBanner) {
+      try { BetView.renderWinBanner(); } catch (e) { /* no #winBet in DOM — safe */ }
+    }
+
     const elapsed = Math.round((Date.now() - s.startedAt) / 1000);
     const abilities = s.players.reduce((a, x) => a + (x.stats?.abilities || 0), 0);
+        // ── Online 1v1 bet banner ──
+    if (typeof BetView !== 'undefined' && BetView.renderWinBanner) {
+      try { BetView.renderWinBanner(); } catch (e) { console.warn('[app] bet banner', e); }
+    }
     document.getElementById('winStats').innerHTML = `
       <div class="win-stat"><div class="sv">${Math.floor(elapsed/60)}:${String(elapsed%60).padStart(2,'0')}</div><div class="sk">Duration</div></div>
       <div class="win-stat"><div class="sv">${s.turnCount}</div><div class="sk">Turns</div></div>
@@ -297,7 +404,6 @@ const GameFlow = {
     if (isMe) { Sound.win(); if (typeof Haptics !== 'undefined') Haptics.win(); }
     else { Sound.lose(); if (typeof Haptics !== 'undefined') Haptics.lose(); }
 
-    // Meme SFX on win
     if (typeof SoundPacks !== 'undefined') SoundPacks.play('airhorn');
 
     const cx = innerWidth / 2, cy = innerHeight * .35;
@@ -315,7 +421,7 @@ const GameFlow = {
       const s = ArenaView.state;
       const gameEnded = !s || s.winner !== null;
       if (!gameEnded) return;
-      if (Net.isHost) { this.startMultiplayer(); }
+      if (Net.isHost) { this.hostStartGame(); }
       else {
         Net.sendRematchRequest();
         Toast.show('Rematch requested');
@@ -337,7 +443,9 @@ const GameFlow = {
       players: cfg.players, universeId: cfg.universeId,
       customDef: cfg.customDef, rules: cfg.rules, universeName: cfg.universeName
     });
-    state.rulesLabel = RULE_PRESETS[RuleStudioView.presetKey]?.name || 'Custom';
+    state.rulesLabel = this._1v1Active
+      ? (state.rulesLabel || 'Custom')
+      : (RULE_PRESETS[RuleStudioView.presetKey]?.name || 'Custom');
     if (typeof Achievements !== 'undefined') Achievements.onMatchStart();
     if (typeof PrivacyScreen !== 'undefined' && PrivacyScreen.reset) PrivacyScreen.reset();
     show('screen-game');
@@ -389,7 +497,7 @@ function wireNet() {
     setTimeout(() => {
       GameFlow._rematchPending = false;
       const s2 = ArenaView.state;
-      if (Net.isHost && (!s2 || s2.winner !== null)) GameFlow.startMultiplayer();
+      if (Net.isHost && (!s2 || s2.winner !== null)) GameFlow.hostStartGame();
     }, 450);
   });
 }
@@ -450,6 +558,8 @@ function checkUrlInvite() {
   if (typeof ShareRoom !== 'undefined') ShareRoom.mount();
   if (typeof RoomBrowser !== 'undefined') RoomBrowser.mount();
   if (typeof RoomExtras !== 'undefined') RoomExtras.mount();
+    if (typeof BetView !== 'undefined' && BetView.mount) BetView.mount();
+  if (typeof BetView !== 'undefined' && BetView.mount) BetView.mount();
 
   document.getElementById('btnDraw').onclick = () => {
     const s = ArenaView.state;

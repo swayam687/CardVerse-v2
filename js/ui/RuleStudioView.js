@@ -1,10 +1,6 @@
 /* ============================================================
-   ui/RuleStudioView.js — Advanced Rules modal (Pulse)
-
-   Bulletproof against script load order:
-     · rules are lazily initialized on first access
-     · no top-level call to defaultRules()
-     · graceful fallback if rules.js hasn't loaded yet
+   ui/RuleStudioView.js — v2.19
+   Fixes: skips hidden items and non-editable types.
    ============================================================ */
 const RuleStudioView = {
   presetKey: 'classic',
@@ -13,18 +9,15 @@ const RuleStudioView = {
   get rules() {
     if (!this._rules) {
       if (typeof defaultRules !== 'function') {
-        console.error(
-          '[RuleStudioView] defaultRules() is not defined. ' +
-          'Check that js/data/rules.js loads BEFORE js/ui/RuleStudioView.js in index.html.'
-        );
-        // Safe fallback so the UI still opens.
+        console.error('[RuleStudioView] defaultRules() missing. Check load order.');
         this._rules = {
-          matching:  { color: true, rank: true, universe: false, character: false, type: false },
-          stacking:  { draw2OnDraw2: true, draw4OnDraw2: false, draw4OnDraw4: false, draw2OnDraw4: false },
-          turn:      { timer: 0, drawUntilPlayable: false, jumpIn: false },
-          draw:      { count: 1, playAfterDraw: true, forcePlay: false },
-          abilities: { enabled: true, costEnabled: true },
-          deal:      { handSize: 7, reshuffle: true }
+          matching: { color: true, rank: true, character: false, type: false },
+          stacking: { draw2OnDraw2: true, draw4OnDraw2: false, draw4OnDraw4: false, draw2OnDraw4: false, anyColor: false, powerStacking: false },
+          turn: { timer: 0, drawUntilPlayable: false },
+          draw: { count: 1, playAfterDraw: true, forcePlay: false },
+          handLimit: { forcePlayAt: 0, eliminateAt: 0, drawCap: 0 },
+          abilities: { enabled: true, stickyShield: false },
+          deal: { handSize: 7, reshuffle: true, noMercyExtras: false, noMercyNumbers: false, extraDraws: false, deckMode: 'normal' }
         };
       } else {
         this._rules = defaultRules();
@@ -37,15 +30,11 @@ const RuleStudioView = {
 
   openModal(onChange) {
     let fired = false;
-    const fire = () => {
-      if (fired) return;
-      fired = true;
-      if (typeof onChange === 'function') onChange();
-    };
+    const fire = () => { if (!fired) { fired = true; if (typeof onChange === 'function') onChange(); } };
 
     const m = Modal.open(`
       <h2>Advanced Rules</h2>
-      <div class="hint">Pick a preset, then fine-tune. Most players stay on Classic.</div>
+      <div class="hint">Pick a mode, then fine-tune. Host controls in online rooms.</div>
       <div class="preset-grid" id="presetGrid"></div>
       <div id="ruleGroups"></div>
       <button class="btn primary big" style="width:100%;margin-top:12px" id="rulesDone">Done</button>
@@ -57,12 +46,7 @@ const RuleStudioView = {
     this.renderGroupsModal(m);
 
     const doneBtn = m.querySelector('#rulesDone');
-    if (doneBtn) {
-      doneBtn.onclick = () => {
-        Modal.close();
-        fire();
-      };
-    }
+    if (doneBtn) doneBtn.onclick = () => { Modal.close(); fire(); };
   },
 
   renderPresetsModal(host) {
@@ -95,10 +79,7 @@ const RuleStudioView = {
     if (!groups) return;
     groups.innerHTML = '';
 
-    // Snapshot of the canonical shape — used to backfill missing keys.
-    const canonical = (typeof defaultRules === 'function')
-      ? defaultRules()
-      : this.rules; // fallback: use whatever we already have
+    const canonical = (typeof defaultRules === 'function') ? defaultRules() : this.rules;
 
     for (const g of RULE_SCHEMA) {
       if (!this.rules[g.key] || typeof this.rules[g.key] !== 'object') {
@@ -110,6 +91,10 @@ const RuleStudioView = {
       box.innerHTML = `<h3>${g.icon || ''} ${esc(g.group || g.key)}</h3>`;
 
       for (const item of g.items) {
+        // Skip hidden items and non-editable metadata
+        if (item.hidden) continue;
+        if (item.type === 'str') continue;
+
         if (this.rules[g.key][item.key] === undefined) {
           this.rules[g.key][item.key] =
             (canonical[g.key] && canonical[g.key][item.key] !== undefined)
@@ -137,7 +122,7 @@ const RuleStudioView = {
             this.rules[g.key][item.key] = cb.checked;
             this.presetKey = 'custom';
           };
-        } else {
+        } else if (item.type === 'num') {
           row.innerHTML = `
             <div>
               <div class="rl">${esc(item.label)}</div>
@@ -153,6 +138,9 @@ const RuleStudioView = {
             this.rules[g.key][item.key] = v;
             this.presetKey = 'custom';
           };
+        } else {
+          // Unknown type — skip
+          continue;
         }
         box.appendChild(row);
       }

@@ -102,15 +102,19 @@
             <option value="6">6</option><option value="7">7</option>
           </select>
         </div>
-        <div class="config-cell">
-          <label class="fl">Rules</label>
+        <div class="config-cell" style="display:none">
           <select id="selRules"></select>
         </div>
       </div>
     </div>
 
+    <div class="mode-section">
+      <div class="fl" style="margin-bottom:10px">🎮 Game Mode</div>
+      <div class="mode-grid" id="mainModeGrid"></div>
+    </div>
+
     <div class="home-links">
-      <button class="link-btn" id="btnOpenRules">⚙ Advanced Rules</button>
+      <button class="link-btn" id="btnOpenRules">🔧 Customize Rules</button>
       <button class="link-btn" id="btnOpenCustom">🎨 Deck Studio</button>
       <button class="link-btn" id="btnAchievements">🏅 Achievements</button>
       <button class="link-btn" id="btnCreateRoom">🌐 Create Online Room</button>
@@ -144,6 +148,8 @@
     </div>
 
     <div id="shareBox" class="share-box" style="display:none"></div>
+
+    <div id="roomBetPanel" style="display:none"></div>
 
     <div class="room-section">
       <div class="room-section-title">
@@ -276,6 +282,7 @@
       <h1 class="win-title" id="winTitle">Victory!</h1>
       <div class="win-sub" id="winSub">You emptied your hand first.</div>
       <div class="win-stats" id="winStats"></div>
+      <div id="winBet"></div>
       <div class="win-actions">
         <button class="btn primary big" id="btnRematch">Rematch</button>
         <button class="btn ghost" id="btnHome">Home</button>
@@ -320,6 +327,7 @@
 <script src="/js/ui/LobbyView.js"></script>
 <script src="/js/ui/ProfileEdit.js"></script>
 <script src="/js/ui/RoomBrowser.js"></script>
+<script src="/js/ui/BetView.js"></script>
 <script src="/js/ui/RoomExtras.js"></script>
 <script src="/js/ui/RoomView.js"></script>
 <script src="/js/ui/ArenaView.js"></script>
@@ -329,7 +337,6 @@
 
 <script src="/js/app.js"></script>
 <script>
-/* Post-load belt-and-braces */
 window.addEventListener('load', function () {
   try { if (window.Taunts && Taunts.mount) Taunts.mount(); }
   catch (e) { console.error('[boot] Taunts.mount failed', e); }
@@ -339,6 +346,8 @@ window.addEventListener('load', function () {
   catch (e) { console.error('[boot] RoomBrowser.mount failed', e); }
   try { if (window.RoomExtras && RoomExtras.mount) RoomExtras.mount(); }
   catch (e) { console.error('[boot] RoomExtras.mount failed', e); }
+  try { if (window.BetView && BetView.mount) BetView.mount(); }
+  catch (e) { console.error('[boot] BetView.mount failed', e); }
 });
 </script>
 </body>

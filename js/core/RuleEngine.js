@@ -1,14 +1,9 @@
 /* ============================================================
-   js/core/RuleEngine.js — v2.12
-   canStack: rules.stacking.anyColor skips the color gate.
-   meetsRequirement: wilds always pass; ability gating happens
-                     at resolve time in GameEngine.
+   core/RuleEngine.js — v2.19
+   +6 / +10 stacking · filters eliminated players.
    ============================================================ */
-
 const RuleEngine = {
-  top(state) {
-    return state.discard[state.discard.length - 1] || null;
-  },
+  top(state) { return state.discard[state.discard.length - 1] || null; },
 
   stackAmount(card) {
     if (!card || !Array.isArray(card.effects)) return 0;
@@ -29,6 +24,12 @@ const RuleEngine = {
       const colorOK = card.color === 'wild' || card.color === state.activeColor;
       if (!colorOK) return false;
     }
+
+    const power = s.powerStacking === true;
+
+    // Power stacking (No Mercy): +6 and +10 chain with everything
+    if (power && amt >= 6) return true;
+    if (power && pending >= 6) return true;
 
     const d2d2 = s.draw2OnDraw2 !== false;
     const d4d2 = s.draw4OnDraw2 === true;
@@ -56,12 +57,6 @@ const RuleEngine = {
     return false;
   },
 
-  /**
-   * Gate for playing the card itself.
-   * Wild cards are always playable — their ability (if any) is gated
-   * separately at resolve time, so a wild with an expensive ability
-   * (Thanos, Kaguya) can still be played as a plain color change.
-   */
   meetsRequirement(card, player) {
     if (!card.requires) return true;
     if (card.color === 'wild') return true;
@@ -71,14 +66,31 @@ const RuleEngine = {
 
   targets(state, actor, keyword) {
     const n = state.players.length;
-    const next = mod(actor + state.direction, n);
-    const prev = mod(actor - state.direction, n);
+    const dir = state.direction;
+    // Next non-eliminated player
+    const next = (() => {
+      let i = mod(actor + dir, n);
+      let guard = 0;
+      while (state.players[i] && state.players[i].eliminated && guard++ < n) {
+        i = mod(i + dir, n);
+      }
+      return i;
+    })();
+    const prev = (() => {
+      let i = mod(actor - dir, n);
+      let guard = 0;
+      while (state.players[i] && state.players[i].eliminated && guard++ < n) {
+        i = mod(i - dir, n);
+      }
+      return i;
+    })();
+    const alive = state.players.map((_, i) => i).filter(i => !state.players[i].eliminated);
     switch (keyword) {
       case 'self':   return [actor];
       case 'next':   return [next];
       case 'prev':   return [prev];
-      case 'all':    return state.players.map((_, i) => i);
-      case 'others': return state.players.map((_, i) => i).filter(i => i !== actor);
+      case 'all':    return alive;
+      case 'others': return alive.filter(i => i !== actor);
       default:       return [];
     }
   }

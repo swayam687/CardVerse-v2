@@ -1030,3 +1030,79 @@ html.reduced-motion .reveal-overlay { animation: none !important; }
 .modal .player-pick-btn {
   pointer-events: auto !important;
 }
+
+
+
+
+
+/* ============================================================
+   v2.20 — Home screen mode cards + tab styles
+   ============================================================ */
+
+.mode-section {
+  margin-bottom: var(--s-5);
+}
+
+.mode-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.mode-card {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: var(--s-3);
+  row-gap: 2px;
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  color: var(--text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .12s, box-shadow .2s;
+}
+
+.mode-card:hover {
+  background: var(--bg-surface-2);
+  border-color: var(--border-strong);
+}
+
+.mode-card:active { transform: scale(.985); }
+
+.mode-card.sel {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.mc-icon {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: center;
+  font-size: 26px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,.4));
+}
+
+.mc-name {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: var(--fs-400);
+  font-weight: 900;
+  letter-spacing: -0.2px;
+  line-height: 1.15;
+}
+
+.mc-desc {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: var(--fs-200);
+  font-weight: 700;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
